@@ -1,13 +1,15 @@
 import { useEffect, useState, useRef } from 'react';
-import { fetchWeatherGif, getCachedBackground } from '../services/weatherBackground';
+import { getWeatherBackground, getCachedBackground } from '../services/weatherBackground';
+import { getStaticFallback } from '../config/weatherAssets';
 
 /**
  * WeatherBackground Component
  * Displays dynamic GIF/video background based on weather conditions
+ * Uses tiered fallback: Curated assets -> Giphy API -> Static images
  * 
  * @param {string} weatherKey - Weather condition key (e.g., 'rain', 'sunny')
  * @param {string} weatherDescription - Full weather description for alt text
- * @param {boolean} preferVideo - Whether to prefer videos over GIFs (future enhancement)
+ * @param {boolean} preferVideo - Whether to prefer videos over GIFs
  * @param {string} giphyApiKey - Optional Giphy API key
  */
 export default function WeatherBackground({ 
@@ -16,10 +18,12 @@ export default function WeatherBackground({
   preferVideo = false,
   giphyApiKey = null 
 }) {
-  const [backgroundUrl, setBackgroundUrl] = useState(null);
+  const [backgroundData, setBackgroundData] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [useStaticFallback, setUseStaticFallback] = useState(false);
   const imgRef = useRef(null);
+  const videoRef = useRef(null);
 
   useEffect(() => {
     if (!weatherKey) {
@@ -27,10 +31,17 @@ export default function WeatherBackground({
       return;
     }
 
-    // Check cache first for instant display
+    // Check cache first for instant display (legacy support)
     const cached = getCachedBackground(weatherKey);
     if (cached) {
-      setBackgroundUrl(cached);
+      // If we have a cached URL, determine format
+      const format = cached.includes('.mp4') || cached.includes('/mp4') ? 'video' : 
+                     cached.includes('.gif') ? 'gif' : 'image';
+      setBackgroundData({
+        url: cached,
+        type: 'cached',
+        format,
+      });
       setIsLoading(false);
       return;
     }
@@ -38,26 +49,104 @@ export default function WeatherBackground({
     // Fetch new background
     setIsLoading(true);
     setError(null);
+    setUseStaticFallback(false);
 
-    fetchWeatherGif(weatherKey, giphyApiKey, preferVideo)
-      .then((url) => {
-        setBackgroundUrl(url);
+    getWeatherBackground(weatherKey, giphyApiKey, preferVideo)
+      .then((data) => {
+        setBackgroundData(data);
         setIsLoading(false);
       })
       .catch((err) => {
         console.error('Error loading weather background:', err);
         setError(err);
         setIsLoading(false);
+        // On error, try static fallback
+        setUseStaticFallback(true);
       });
   }, [weatherKey, giphyApiKey, preferVideo]);
 
   // Preload next image when URL changes for smooth transitions
   useEffect(() => {
-    if (backgroundUrl && imgRef.current) {
+    if (backgroundData?.url && backgroundData.format === 'image' && imgRef.current) {
       const img = new Image();
-      img.src = backgroundUrl;
+      img.src = backgroundData.url;
     }
-  }, [backgroundUrl]);
+  }, [backgroundData]);
+
+  // Determine what to render based on format
+  const renderMedia = () => {
+    if (!backgroundData?.url) return null;
+
+    const { url, format } = backgroundData;
+
+    // Video format
+    if (format === 'video' || (preferVideo && (url.includes('.mp4') || url.includes('/mp4')))) {
+      return (
+        <video
+          ref={videoRef}
+          autoPlay
+          loop
+          muted
+          playsInline
+          style={{
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            opacity: isLoading ? 0 : 1,
+            transition: 'opacity 0.5s ease-in-out',
+          }}
+          onLoadedData={() => {
+            setIsLoading(false);
+            setUseStaticFallback(false);
+          }}
+          onError={() => {
+            console.warn('Video failed to load, falling back to static image');
+            setUseStaticFallback(true);
+            setIsLoading(false);
+          }}
+        >
+          <source src={url} type="video/mp4" />
+          <source src={url} type="video/webm" />
+        </video>
+      );
+    }
+
+    // GIF or Image format
+    return (
+      <img
+        ref={imgRef}
+        src={url}
+        alt={`Weather background: ${weatherDescription || weatherKey}`}
+        style={{
+          width: '100%',
+          height: '100%',
+          objectFit: 'cover',
+          opacity: isLoading ? 0 : 1,
+          transition: 'opacity 0.5s ease-in-out',
+        }}
+        onLoad={() => {
+          setIsLoading(false);
+          setUseStaticFallback(false);
+        }}
+        onError={() => {
+          console.warn('Image/GIF failed to load, using static fallback');
+          // If not already a static image, try to get static fallback
+          if (backgroundData.type !== 'static') {
+            setUseStaticFallback(true);
+          }
+          setIsLoading(false);
+        }}
+      />
+    );
+  };
+
+  // Get static fallback URL if needed
+  const getStaticFallbackUrl = () => {
+    if (backgroundData?.type === 'static') {
+      return backgroundData.url;
+    }
+    return getStaticFallback(weatherKey || 'neutral');
+  };
 
   return (
     <div
@@ -73,65 +162,26 @@ export default function WeatherBackground({
       }}
     >
       {/* Background Media */}
-      {backgroundUrl && (
-        <div
+      {backgroundData?.url && !useStaticFallback && renderMedia()}
+
+      {/* Static Fallback (shown when media fails to load or useStaticFallback is true) */}
+      {(useStaticFallback || error) && (
+        <img
+          src={getStaticFallbackUrl()}
+          alt={`Weather background: ${weatherDescription || weatherKey}`}
           style={{
-            position: 'absolute',
-            top: '50%',
-            left: '50%',
-            transform: 'translate(-50%, -50%)',
-            minWidth: '100%',
-            minHeight: '100%',
-            width: 'auto',
-            height: 'auto',
+            width: '100%',
+            height: '100%',
             objectFit: 'cover',
+            opacity: isLoading ? 0 : 1,
+            transition: 'opacity 0.5s ease-in-out',
           }}
-        >
-          {preferVideo && (backgroundUrl.includes('.mp4') || backgroundUrl.includes('/mp4')) ? (
-            <video
-              autoPlay
-              loop
-              muted
-              playsInline
-              style={{
-                width: '100%',
-                height: '100%',
-                objectFit: 'cover',
-                opacity: isLoading ? 0 : 1,
-                transition: 'opacity 0.5s ease-in-out',
-              }}
-              onLoadedData={() => setIsLoading(false)}
-              onError={() => {
-                setError(new Error('Failed to load background video'));
-                setIsLoading(false);
-              }}
-            >
-              <source src={backgroundUrl} type="video/mp4" />
-            </video>
-          ) : (
-            <img
-              ref={imgRef}
-              src={backgroundUrl}
-              alt={`Weather background: ${weatherDescription || weatherKey}`}
-              style={{
-                width: '100%',
-                height: '100%',
-                objectFit: 'cover',
-                opacity: isLoading ? 0 : 1,
-                transition: 'opacity 0.5s ease-in-out',
-              }}
-              onLoad={() => setIsLoading(false)}
-              onError={() => {
-                setError(new Error('Failed to load background image'));
-                setIsLoading(false);
-              }}
-            />
-          )}
-        </div>
+          onLoad={() => setIsLoading(false)}
+        />
       )}
 
-      {/* Loading indicator (optional, can be removed) */}
-      {isLoading && !backgroundUrl && (
+      {/* Loading indicator */}
+      {isLoading && !backgroundData?.url && (
         <div
           style={{
             position: 'absolute',

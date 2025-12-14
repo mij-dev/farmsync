@@ -1,116 +1,172 @@
 /**
  * Weather Background Service
- * Handles fetching and caching weather-appropriate GIFs/videos
+ * 
+ * Provides professional, consistent weather backgrounds using a tiered approach:
+ * 1. Curated assets (local/CDN) - highest quality, most reliable
+ * 2. Giphy API fallback - deterministic, professional queries
+ * 3. Static image fallback - graceful degradation
  */
 
-// Cache for storing fetched GIF URLs by weather type
-const backgroundCache = new Map();
+import {
+  getCuratedAsset,
+  getStaticFallback,
+  getGiphyQuery,
+} from '../config/weatherAssets';
 
-// Default fallback images (can be replaced with actual URLs or local assets)
-const FALLBACK_IMAGES = {
-  thunder: 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1920&q=80',
-  'heavy-rain': 'https://images.unsplash.com/photo-1433863448220-78aaa064ff47?w=1920&q=80',
-  rain: 'https://images.unsplash.com/photo-1527482797697-8795b05a13fe?w=1920&q=80',
-  wind: 'https://images.unsplash.com/photo-1504608524841-42fe6f032b4b?w=1920&q=80',
-  sunny: 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1920&q=80',
-  cloud: 'https://images.unsplash.com/photo-1501594907352-04cda38ebc29?w=1920&q=80',
-  neutral: 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1920&q=80',
-};
+// Cache for storing fetched GIF URLs by weather type (for API fallbacks)
+const apiFallbackCache = new Map();
+
+// Cache for asset availability checks
+const assetAvailabilityCache = new Map();
 
 /**
- * Maps weather condition keys to Giphy search terms
+ * Checks if an asset URL is accessible
+ * @param {string} url - Asset URL to check
+ * @returns {Promise<boolean>} True if asset is accessible
  */
-function getGiphySearchTerm(weatherKey) {
-  const searchTerms = {
-    thunder: 'thunderstorm lightning',
-    'heavy-rain': 'heavy rain storm',
-    rain: 'rain weather',
-    wind: 'windy weather',
-    sunny: 'sunny clear sky',
-    cloud: 'cloudy sky',
-    neutral: 'weather nature',
-  };
-  return searchTerms[weatherKey] || 'weather';
+async function checkAssetAvailability(url) {
+  // Check cache first
+  if (assetAvailabilityCache.has(url)) {
+    return assetAvailabilityCache.get(url);
+  }
+
+  try {
+    const response = await fetch(url, { method: 'HEAD', cache: 'no-cache' });
+    const isAvailable = response.ok;
+    assetAvailabilityCache.set(url, isAvailable);
+    return isAvailable;
+  } catch (error) {
+    assetAvailabilityCache.set(url, false);
+    return false;
+  }
 }
 
 /**
- * Fetches a GIF from Giphy API based on weather condition
- * @param {string} weatherKey - The weather condition key (e.g., 'rain', 'sunny')
- * @param {string} giphyApiKey - Giphy API key (optional, reads from env if not provided)
- * @param {boolean} preferVideo - Whether to prefer video format (future enhancement)
- * @returns {Promise<string>} URL of the GIF/video
+ * Fetches a deterministic GIF from Giphy API (used as fallback)
+ * Uses limit=1 and always returns the same result for a given weather type
+ * @param {string} weatherKey - The weather condition key
+ * @param {string} apiKey - Giphy API key
+ * @param {boolean} preferVideo - Whether to prefer video format
+ * @returns {Promise<string|null>} URL of the GIF/video or null if not found
  */
-export async function fetchWeatherGif(weatherKey, giphyApiKey = null, preferVideo = false) {
+async function fetchGiphyFallback(weatherKey, apiKey, preferVideo = false) {
   // Check cache first
-  if (backgroundCache.has(weatherKey)) {
-    return backgroundCache.get(weatherKey);
+  if (apiFallbackCache.has(weatherKey)) {
+    return apiFallbackCache.get(weatherKey);
   }
 
-  // Get API key from parameter, env var, or use null (will use fallback)
-  const apiKey = giphyApiKey || import.meta.env.VITE_GIPHY_API_KEY;
-  
-  // If no API key, use fallback immediately
-  if (!apiKey) {
-    console.info('No Giphy API key provided. Using fallback images.');
-    const fallback = FALLBACK_IMAGES[weatherKey] || FALLBACK_IMAGES.neutral;
-    backgroundCache.set(weatherKey, fallback);
-    return fallback;
-  }
-
-  const searchTerm = getGiphySearchTerm(weatherKey);
+  const searchQuery = getGiphyQuery(weatherKey);
 
   try {
-    // Giphy API endpoint - use videos endpoint if preferVideo is true
+    // Use videos endpoint if preferVideo, otherwise gifs
     const endpoint = preferVideo ? 'videos/search' : 'gifs/search';
-    const url = `https://api.giphy.com/v1/${endpoint}?api_key=${apiKey}&q=${encodeURIComponent(searchTerm)}&limit=10&rating=g&lang=en`;
+    // Limit to 1 for deterministic results (always same GIF for same weather type)
+    const url = `https://api.giphy.com/v1/${endpoint}?api_key=${apiKey}&q=${encodeURIComponent(searchQuery)}&limit=1&rating=g&lang=en`;
 
     const response = await fetch(url);
-    
+
     if (!response.ok) {
-      // If API fails, use fallback
-      if (response.status === 401 || response.status === 403) {
-        console.warn('Giphy API key invalid or rate limited. Using fallback images.');
-      } else {
-        console.warn(`Giphy API error: ${response.status}. Using fallback images.`);
-      }
-      const fallback = FALLBACK_IMAGES[weatherKey] || FALLBACK_IMAGES.neutral;
-      backgroundCache.set(weatherKey, fallback);
-      return fallback;
+      console.warn(`Giphy API error for ${weatherKey}: ${response.status}`);
+      return null;
     }
 
     const data = await response.json();
-    
+
     if (data.data && data.data.length > 0) {
-      // Select a random result from the results for variety
-      const randomIndex = Math.floor(Math.random() * data.data.length);
       let mediaUrl;
-      
-      if (preferVideo && data.data[randomIndex].images) {
+
+      if (preferVideo && data.data[0].images) {
         // Use video URL if available
-        const videoData = data.data[randomIndex].images;
-        mediaUrl = videoData.original_mp4?.mp4 || videoData.original?.url || data.data[randomIndex].images.original.url;
+        const videoData = data.data[0].images;
+        mediaUrl = videoData.original_mp4?.mp4 || videoData.original?.url || data.data[0].images.original.url;
       } else {
-        // Use GIF URL
-        mediaUrl = data.data[randomIndex].images.original.url;
+        // Use GIF URL (deterministic - always first result)
+        mediaUrl = data.data[0].images.original.url;
       }
-      
+
       // Cache the result
-      backgroundCache.set(weatherKey, mediaUrl);
-      
+      apiFallbackCache.set(weatherKey, mediaUrl);
       return mediaUrl;
-    } else {
-      // No results, use fallback
-      const fallback = FALLBACK_IMAGES[weatherKey] || FALLBACK_IMAGES.neutral;
-      backgroundCache.set(weatherKey, fallback);
-      return fallback;
     }
+
+    return null;
   } catch (error) {
-    console.warn('Failed to fetch media from Giphy:', error);
-    // Return fallback image on error
-    const fallback = FALLBACK_IMAGES[weatherKey] || FALLBACK_IMAGES.neutral;
-    backgroundCache.set(weatherKey, fallback);
-    return fallback;
+    console.warn(`Failed to fetch Giphy fallback for ${weatherKey}:`, error);
+    return null;
   }
+}
+
+/**
+ * Gets the best available background asset for a weather condition
+ * Uses tiered fallback: Curated -> Giphy -> Static Image
+ * 
+ * @param {string} weatherKey - The weather condition key (e.g., 'rain', 'sunny')
+ * @param {string} giphyApiKey - Giphy API key (optional, for fallback)
+ * @param {boolean} preferVideo - Whether to prefer video format
+ * @returns {Promise<{url: string, type: 'curated' | 'api' | 'static', format: 'gif' | 'video' | 'image'}>}
+ */
+export async function getWeatherBackground(weatherKey, giphyApiKey = null, preferVideo = false) {
+  if (!weatherKey) {
+    const staticUrl = getStaticFallback('neutral');
+    return {
+      url: staticUrl,
+      type: 'static',
+      format: 'image',
+    };
+  }
+
+  // Tier 1: Try curated assets first
+  const curatedAsset = getCuratedAsset(weatherKey, preferVideo);
+  if (curatedAsset) {
+    // Check if curated asset is accessible
+    const isAvailable = await checkAssetAvailability(curatedAsset);
+    if (isAvailable) {
+      // Determine format from URL
+      let format = 'image';
+      if (curatedAsset.includes('.gif')) format = 'gif';
+      else if (curatedAsset.includes('.mp4') || curatedAsset.includes('.webm')) format = 'video';
+
+      return {
+        url: curatedAsset,
+        type: 'curated',
+        format,
+      };
+    }
+    // If curated asset not available, try static image from curated assets
+    const curatedAssetObj = getCuratedAsset(weatherKey, false);
+    if (typeof curatedAssetObj === 'object' && curatedAssetObj.image) {
+      const imageAvailable = await checkAssetAvailability(curatedAssetObj.image);
+      if (imageAvailable) {
+        return {
+          url: curatedAssetObj.image,
+          type: 'curated',
+          format: 'image',
+        };
+      }
+    }
+  }
+
+  // Tier 2: Try Giphy API fallback (deterministic)
+  const apiKey = giphyApiKey || import.meta.env.VITE_GIPHY_API_KEY;
+  if (apiKey) {
+    const giphyUrl = await fetchGiphyFallback(weatherKey, apiKey, preferVideo);
+    if (giphyUrl) {
+      const format = preferVideo && (giphyUrl.includes('.mp4') || giphyUrl.includes('/mp4')) ? 'video' : 'gif';
+      return {
+        url: giphyUrl,
+        type: 'api',
+        format,
+      };
+    }
+  }
+
+  // Tier 3: Use static fallback image
+  const staticUrl = getStaticFallback(weatherKey);
+  return {
+    url: staticUrl,
+    type: 'static',
+    format: 'image',
+  };
 }
 
 /**
@@ -120,23 +176,44 @@ export async function fetchWeatherGif(weatherKey, giphyApiKey = null, preferVide
  * @param {boolean} preferVideo - Whether to prefer video format
  */
 export async function preloadWeatherBackground(weatherKey, giphyApiKey = null, preferVideo = false) {
-  if (!backgroundCache.has(weatherKey)) {
-    await fetchWeatherGif(weatherKey, giphyApiKey, preferVideo);
-  }
+  await getWeatherBackground(weatherKey, giphyApiKey, preferVideo);
 }
 
 /**
- * Clears the background cache
+ * Clears all caches (useful for testing or forcing refresh)
  */
 export function clearBackgroundCache() {
-  backgroundCache.clear();
+  apiFallbackCache.clear();
+  assetAvailabilityCache.clear();
 }
 
 /**
- * Gets cached background URL if available
+ * Gets cached API fallback URL if available
  * @param {string} weatherKey - The weather condition key
  * @returns {string|null} Cached URL or null
  */
+export function getCachedApiFallback(weatherKey) {
+  return apiFallbackCache.get(weatherKey) || null;
+}
+
+/**
+ * Legacy function for backward compatibility
+ * @deprecated Use getWeatherBackground instead
+ */
+export async function fetchWeatherGif(weatherKey, giphyApiKey = null, preferVideo = false) {
+  const result = await getWeatherBackground(weatherKey, giphyApiKey, preferVideo);
+  return result.url;
+}
+
+/**
+ * Legacy function for backward compatibility
+ * @deprecated Use getWeatherBackground instead
+ */
 export function getCachedBackground(weatherKey) {
-  return backgroundCache.get(weatherKey) || null;
+  // Check curated assets first
+  const curated = getCuratedAsset(weatherKey, false);
+  if (curated) return curated;
+  
+  // Check API cache
+  return getCachedApiFallback(weatherKey);
 }
