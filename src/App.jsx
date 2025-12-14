@@ -446,7 +446,7 @@ export default function App() {
           {/* Header */}
           <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
             <div>
-              <div style={{ fontSize: 14, opacity: 0.8 }}>FarmSync • Weather Module</div>
+              <div style={{ fontSize: 14, opacity: 0.8 }}>FarmSync</div>
               <div style={{ fontSize: 22, fontWeight: 700 }}>Weather</div>
             </div>
 
